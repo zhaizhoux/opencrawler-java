@@ -50,7 +50,7 @@
 # 1. 构建（生成 build/opencrawler-java.jar）
 bash build.sh                 # Windows 也可双击 build.bat
 
-# 2. 不访问公网，跑完整自测（20 项断言，应输出 SELFTEST PASS）
+# 2. 不访问公网，跑完整自测（25 项断言，应输出 SELFTEST PASS）
 java -jar build/opencrawler-java.jar selftest
 
 # 3. 起本机演示站点（robots.txt / HTML / JSON / RSS / Sitemap / 禁止页）
@@ -131,7 +131,7 @@ src/main/java/io/opencrawler/
   Extractor.java    HTML/CSS/JSON Storage.java   JSONL 结果
   Metrics.java      指标           Adaptive.java   AIMD
   Desktop.java      REST + SSE    Demo.java       本机演示站
-  SelfTest.java     20 项自测     Models.java     不可变数据模型
+  SelfTest.java     25 项自测     Models.java     不可变数据模型
   Util.java         URL/编码工具
 desktop/web/        与 Python / C++ 版共用的前端
 docs/               架构与桌面接口契约
