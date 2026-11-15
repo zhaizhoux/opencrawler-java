@@ -4,6 +4,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -32,6 +33,7 @@ public final class SelfTest {
         testLimiter();
         testFrontier();
         testEndToEnd();
+        testStorageQuery();
         testDesktopApi();
         System.out.println(FAILURES.isEmpty() ? "SELFTEST PASS" : "SELFTEST FAIL: " + FAILURES);
         return FAILURES.isEmpty();
@@ -186,6 +188,41 @@ public final class SelfTest {
             check("桌面服务 /api/status 与首页", status.statusCode() == 200
                 && status.body().contains("version") && html.statusCode() == 200
                 && html.body().contains("OpenCrawlerLab"), "");
+            check("首页返回正确 Content-Type",
+                html.headers().firstValue("Content-Type").orElse("").contains("text/html"), "");
+            HttpResponse<String> info = client.send(HttpRequest.newBuilder(URI.create(url + "/api/info"))
+                .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.ofString());
+            check("桌面服务 /api/info 标识实现", info.statusCode() == 200
+                && info.body().contains("\"implementation\":\"java\"")
+                && info.body().contains("0.3.0"), "");
+            check("状态快照补齐指标字段", status.body().contains("implementation")
+                && status.body().contains("uptime_seconds")
+                && status.body().contains("duplicates"), "");
+            HttpResponse<String> results = client.send(HttpRequest.newBuilder(URI.create(url + "/api/results?limit=5&q=zzz"))
+                .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.ofString());
+            check("结果接口返回 total/limit/offset", results.statusCode() == 200
+                && results.body().contains("\"total\"")
+                && results.body().contains("\"offset\""), "");
         } catch (Exception e) { check("桌面服务 /api/status 与首页", false, e.toString()); }
+    }
+
+    private static void testStorageQuery() {
+        try {
+            Path dir = Files.createTempDirectory("ocl-java-query");
+            List<String> lines = List.of(
+                "{\"url\":\"https://a/one\",\"kind\":\"page\",\"data\":{\"title\":\"Alpha\"}}",
+                "{\"url\":\"https://a/two\",\"kind\":\"sitemap\",\"data\":{\"title\":\"Sitemap\"}}",
+                "{\"url\":\"https://a/three\",\"kind\":\"page\",\"data\":{\"title\":\"Beta\"}}");
+            Files.write(dir.resolve("items.jsonl"), lines, StandardCharsets.UTF_8);
+            Map<String, Object> all = Storage.query(dir.toString(), 100, "", "", 0);
+            Map<String, Object> pages = Storage.query(dir.toString(), 100, "", "page", 0);
+            Map<String, Object> hits = Storage.query(dir.toString(), 100, "alpha", "", 0);
+            Map<String, Object> older = Storage.query(dir.toString(), 2, "", "", 1);
+            check("结果筛选：全量/类型/关键字/offset",
+                Json.intVal(all, "total", -1) == 3
+                    && Json.intVal(pages, "total", -1) == 2
+                    && Json.intVal(hits, "total", -1) == 1
+                    && Json.arr(older.get("items")).size() == 2, "");
+        } catch (Exception e) { check("结果筛选：全量/类型/关键字/offset", false, e.toString()); }
     }
 }

@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,6 +18,8 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -26,6 +29,15 @@ import java.util.logging.Logger;
 /** 桌面服务：JDK 内置 HttpServer，实现与 Python/C++ 版相同的 REST + SSE 契约。 */
 public final class Desktop implements AutoCloseable {
     private static final int MAX_LOGS = 400;
+    private static final String IMPLEMENTATION = "java";
+    private static final Instant STARTED = Instant.now();
+    private static final List<String> ENDPOINTS = List.of(
+        "/api/info", "/api/status", "/api/config", "/api/validate",
+        "/api/start", "/api/stop", "/api/results", "/api/logs",
+        "/api/export", "/api/events");
+    private static final List<String> COMPLIANCE = List.of(
+        "遵守 robots.txt", "遵守 Crawl-delay", "默认限速",
+        "限深限页", "不跟随外链", "不绕过登录/验证码");
     private final HttpServer server;
     private final State state = new State();
     private volatile boolean closed;
@@ -69,10 +81,17 @@ public final class Desktop implements AutoCloseable {
 
         public Map<String, Object> status() {
             Map<String, Object> s = engine == null ? idle() : new LinkedHashMap<>(engine.snapshot());
+            for (String key : List.of("skipped", "duplicates", "links_discovered",
+                    "bytes", "requests_per_second", "elapsed_seconds")) s.putIfAbsent(key, 0);
+            s.putIfAbsent("frontier", Map.of());
+            s.putIfAbsent("adaptive", Map.of("enabled", false));
             s.put("running", running());
             s.put("summary", summary);
             s.put("error", error);
             s.put("version", Config.VERSION);
+            s.put("implementation", IMPLEMENTATION);
+            s.put("platform", System.getProperty("os.name", "unknown"));
+            s.put("uptime_seconds", (System.currentTimeMillis() - STARTED.toEpochMilli()) / 1000.0);
             s.put("output_dir", config.getOrDefault("output_dir", "./output"));
             return s;
         }
@@ -80,7 +99,9 @@ public final class Desktop implements AutoCloseable {
         private Map<String, Object> idle() {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("requests", 0); m.put("succeeded", 0); m.put("failed", 0);
-            m.put("items", 0); m.put("inflight", 0); m.put("frontier", Map.of());
+            m.put("skipped", 0); m.put("duplicates", 0); m.put("links_discovered", 0);
+            m.put("bytes", 0); m.put("items", 0); m.put("inflight", 0);
+            m.put("frontier", Map.of());
             m.put("requests_per_second", 0.0); m.put("elapsed_seconds", 0.0);
             m.put("adaptive", Map.of("enabled", false));
             return m;
@@ -117,6 +138,7 @@ public final class Desktop implements AutoCloseable {
                 case "/", "/index.html" -> asset(ex, "index.html", "text/html; charset=utf-8");
                 case "/app.css" -> asset(ex, "app.css", "text/css; charset=utf-8");
                 case "/app.js" -> asset(ex, "app.js", "application/javascript; charset=utf-8");
+                case "/api/info" -> info(ex);
                 case "/api/events" -> events(ex);
                 case "/api/status" -> json(ex, 200, state.status());
                 case "/api/config" -> {
@@ -150,9 +172,11 @@ public final class Desktop implements AutoCloseable {
                     json(ex, 200, Map.of("ok", true));
                 }
                 case "/api/results" -> {
-                    int limit = queryInt(ex, "limit", 100);
-                    json(ex, 200, Map.of("items", Storage.tail(
-                        String.valueOf(state.config.getOrDefault("output_dir", "./output")), limit)));
+                    int limit = Math.max(1, Math.min(1000, queryInt(ex, "limit", 100)));
+                    int offset = Math.max(0, queryInt(ex, "offset", 0));
+                    json(ex, 200, Storage.query(
+                        String.valueOf(state.config.getOrDefault("output_dir", "./output")),
+                        limit, queryStr(ex, "q"), queryStr(ex, "kind"), offset));
                 }
                 case "/api/logs" -> {
                     int since = queryInt(ex, "since", 0);
@@ -226,6 +250,21 @@ public final class Desktop implements AutoCloseable {
         }
     }
 
+    private static void info(HttpExchange ex) throws IOException {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("implementation", IMPLEMENTATION);
+        m.put("language", "Java " + System.getProperty("java.version", "21"));
+        m.put("version", Config.VERSION);
+        m.put("platform", System.getProperty("os.name", "unknown") + " " + System.getProperty("os.arch", ""));
+        m.put("started_at", STARTED.toString());
+        m.put("uptime_seconds", (System.currentTimeMillis() - STARTED.toEpochMilli()) / 1000.0);
+        m.put("endpoints", ENDPOINTS);
+        m.put("compliance_defaults", COMPLIANCE);
+        m.put("storage_backends", List.of("jsonl", "none"));
+        m.put("result_scan_limit", 20000);
+        json(ex, 200, m);
+    }
+
     private void export(HttpExchange ex) throws IOException {
         Path p = Path.of(String.valueOf(state.config.getOrDefault("output_dir", "./output")), "items.jsonl");
         if (!Files.isRegularFile(p)) { send(ex, 404, "还没有结果文件", "text/plain; charset=utf-8"); return; }
@@ -240,6 +279,10 @@ public final class Desktop implements AutoCloseable {
         try (InputStream in = Desktop.class.getResourceAsStream("/web/" + name)) {
             data = in == null ? Files.readAllBytes(Path.of("desktop", "web", name)) : in.readAllBytes();
         } catch (IOException e) { data = new byte[0]; }
+        if (data.length == 0) { send(ex, 404, "not found", "text/plain; charset=utf-8"); return; }
+        // 曾经漏设 Content-Type，浏览器只能靠嗅探；中文页面尤其容易乱码。
+        ex.getResponseHeaders().set("Content-Type", mime);
+        ex.getResponseHeaders().set("Cache-Control", "no-store");
         ex.sendResponseHeaders(200, data.length);
         ex.getResponseBody().write(data);
     }
@@ -252,13 +295,27 @@ public final class Desktop implements AutoCloseable {
     private static Map<String, Object> error(String message) { return Map.of("error", message); }
 
     private static int queryInt(HttpExchange ex, String key, int def) {
+        String v = rawQuery(ex, key);
+        if (v == null) return def;
+        try { return Integer.parseInt(v); } catch (NumberFormatException ignored) { return def; }
+    }
+
+    private static String queryStr(HttpExchange ex, String key) {
+        String v = rawQuery(ex, key);
+        return v == null ? "" : v.trim();
+    }
+
+    private static String rawQuery(HttpExchange ex, String key) {
         String q = ex.getRequestURI().getRawQuery();
-        if (q == null) return def;
+        if (q == null) return null;
         for (String pair : q.split("&")) {
             String[] kv = pair.split("=", 2);
-            if (kv[0].equals(key)) try { return Integer.parseInt(kv[1]); } catch (NumberFormatException ignored) { }
+            if (!kv[0].equals(key)) continue;
+            if (kv.length < 2) return "";
+            try { return URLDecoder.decode(kv[1], StandardCharsets.UTF_8); }
+            catch (IllegalArgumentException e) { return kv[1]; }
         }
-        return def;
+        return null;
     }
 
     private static void json(HttpExchange ex, int status, Object payload) throws IOException {
