@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: 构建可执行 jar
+        shell: bash
+        run: bash build.sh
+      - name: 打印版本
+        shell: bash
+        run: java -jar build/opencrawler-java.jar version
+      - name: 内置自测（20 项断言）
+        shell: bash
+        run: java -Dstdout.encoding=UTF-8 -jar build/opencrawler-java.jar selftest
+      - name: 配置校验与 dry-run
+        shell: bash
+        run: |
+          java -jar build/opencrawler-java.jar init -o sample.json
+          java -jar build/opencrawler-java.jar validate --config sample.json
+          java -jar build/opencrawler-java.jar crawl --config sample.json --dry-run

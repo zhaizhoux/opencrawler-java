@@ -1,0 +1,27 @@
+# 构建产物
+build/
+out/
+*.class
+*.jar
+
+# 运行产物（抓取数据与断点状态不外传）
+output/
+*.jsonl
+*.tsv
+*.log
+crawler.config.json
+
+# 凭证：绝不入库
+.env
+.env.*
+*.token
+token
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.settings/
+.classpath
+.project
+.DS_Store
+Thumbs.db
